@@ -1,0 +1,13 @@
+{
+  "name": "InSID QR 수신기",
+  "short_name": "InSID QR",
+  "description": "InSID 스냅샷 QR 수신·복원 (오프라인 동작)",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#10141d",
+  "theme_color": "#10141d",
+  "icons": [
+    { "src": "icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }
+  ]
+}

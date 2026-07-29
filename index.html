@@ -1,0 +1,405 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<meta name="theme-color" content="#10141d" />
+<title>InSID QR 수신기</title>
+<link rel="manifest" href="manifest.webmanifest" />
+<link rel="icon" href="icon.svg" type="image/svg+xml" />
+<link rel="apple-touch-icon" href="icon.svg" />
+<style>
+  :root {
+    --bg: #10141d; --panel: #1a2130; --line: #2a3347; --text: #e7ecf5;
+    --dim: #93a0b8; --accent: #4da3ff; --ok: #3ecf8e; --warn: #ffb454; --err: #ff6b6b;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  html, body { height: 100%; }
+  body {
+    background: var(--bg); color: var(--text);
+    font: 15px/1.5 system-ui, -apple-system, "Apple SD Gothic Neo", "Noto Sans KR", sans-serif;
+    padding: max(10px, env(safe-area-inset-top)) 12px calc(16px + env(safe-area-inset-bottom));
+    max-width: 560px; margin: 0 auto;
+    display: grid; gap: 10px; align-content: start;
+  }
+  header { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
+  header h1 { font-size: 17px; font-weight: 800; letter-spacing: -0.01em; }
+  header small { color: var(--dim); font-size: 12px; }
+  .stage { position: relative; border-radius: 14px; overflow: hidden; background: #000; border: 1px solid var(--line); aspect-ratio: 4 / 3; }
+  video { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .stage .hint {
+    position: absolute; inset: auto 0 0 0; padding: 6px 10px; font-size: 12px;
+    color: #fff; background: linear-gradient(transparent, rgba(0,0,0,.65)); text-align: center;
+  }
+  .stage.idle::after {
+    content: '시작을 누르면 카메라가 켜집니다'; position: absolute; inset: 0;
+    display: grid; place-items: center; color: var(--dim); font-size: 14px;
+  }
+  .controls { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  button {
+    appearance: none; border: 1px solid var(--line); border-radius: 10px;
+    background: var(--panel); color: var(--text); font: inherit; font-weight: 700;
+    padding: 11px 8px; min-height: 46px; cursor: pointer;
+  }
+  button:disabled { opacity: .45; }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #08121f; }
+  .bar { height: 8px; border-radius: 99px; background: var(--panel); border: 1px solid var(--line); overflow: hidden; }
+  .bar > span { display: block; height: 100%; width: 0%; background: var(--accent); transition: width .2s; }
+  .bar.done > span { background: var(--ok); }
+  .stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: 6px; }
+  .stats div { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 6px 8px; }
+  .stats dt { font-size: 11px; color: var(--dim); }
+  .stats dd { font-size: 15px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .msg { min-height: 1.4em; font-size: 13px; color: var(--dim); }
+  .missing { display: none; gap: 6px; }
+  .missing.show { display: grid; }
+  .missing p { font-size: 12px; color: var(--warn); font-weight: 700; }
+  .missing code {
+    display: block; max-height: 110px; overflow-y: auto; padding: 8px 10px;
+    background: var(--panel); border: 1px solid var(--line); border-radius: 10px;
+    font: 13px/1.6 ui-monospace, Menlo, monospace; word-break: break-all; user-select: all;
+    -webkit-user-select: all;
+  }
+  .result { display: none; gap: 8px; }
+  .result.show { display: grid; }
+  .result .ok { color: var(--ok); font-weight: 800; font-size: 14px; }
+  .result img { width: 100%; border-radius: 12px; border: 1px solid var(--line); }
+  .result .sha { font: 11px/1.4 ui-monospace, Menlo, monospace; color: var(--dim); word-break: break-all; }
+  .unsupported { display: none; color: var(--err); font-size: 13px; font-weight: 700; }
+</style>
+</head>
+<body>
+<header>
+  <h1>InSID QR 수신기</h1>
+  <small id="engineLabel">-</small>
+</header>
+
+<div class="stage idle" id="stage">
+  <video id="video" playsinline muted></video>
+  <div class="hint" id="hint">QR 화면 전체가 프레임에 들어오게 비추세요</div>
+</div>
+
+<div class="controls">
+  <button class="primary" id="btnStart">시작</button>
+  <button id="btnTorch" disabled>라이트</button>
+  <button id="btnReset">초기화</button>
+</div>
+
+<div class="bar" id="bar"><span id="barFill"></span></div>
+
+<dl class="stats">
+  <div><dt>수신</dt><dd id="stRecv">-</dd></div>
+  <div><dt>누락</dt><dd id="stMiss">-</dd></div>
+  <div><dt>최근</dt><dd id="stLast">-</dd></div>
+  <div><dt>중복/오류</dt><dd id="stDup">0/0</dd></div>
+</dl>
+<p class="msg" id="msg">대기 — 송신 화면의 정보 QR부터 비추세요</p>
+<p class="unsupported" id="unsupported">이 브라우저에서는 카메라를 열 수 없습니다. https 로 접속했는지 확인하세요.</p>
+
+<section class="missing" id="missingBox">
+  <p>누락 재송출용 — 송신 화면 '누락 재송출' 칸에 아래를 입력</p>
+  <code id="missingRanges"></code>
+</section>
+
+<section class="result" id="resultBox">
+  <span class="ok" id="resultTitle">검증 완료</span>
+  <img id="resultImg" alt="복원된 스냅샷" />
+  <button class="primary" id="btnSave">이미지 저장</button>
+  <span class="sha" id="resultSha"></span>
+</section>
+
+<script src="jsqr.min.js"></script>
+<script>
+'use strict';
+/* InSID 스냅샷 QR 수신기 — 단독 동작(서버 불필요) PWA.
+   포맷: web/frontend/src/lib/snapshotQr.ts 와 동일(ISQ1/ISQ2). 변경 시 함께 갱신할 것.
+   엔진: BarcodeDetector(멀티QR/고속) 우선, 미지원(아이폰 등)이면 jsQR 폴백. */
+
+// ── ISQ 파서 (snapshotQr.ts 포팅) ──
+const CRC32_TABLE = new Uint32Array(256);
+for (let n = 0; n < 256; n += 1) {
+  let c = n;
+  for (let k = 0; k < 8; k += 1) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+  CRC32_TABLE[n] = c >>> 0;
+}
+function crc32Hex(bytes) {
+  let crc = 0xffffffff;
+  for (let i = 0; i < bytes.length; i += 1) crc = CRC32_TABLE[(crc ^ bytes[i]) & 0xff] ^ (crc >>> 8);
+  return ((crc ^ 0xffffffff) >>> 0).toString(16).padStart(8, '0');
+}
+function base64ToBytes(b64) {
+  const bin = atob(b64);
+  const out = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i += 1) out[i] = bin.charCodeAt(i);
+  return out;
+}
+async function sha256Hex(bytes) {
+  if (!crypto.subtle) return null;
+  const digest = await crypto.subtle.digest('SHA-256', bytes.slice().buffer);
+  return Array.from(new Uint8Array(digest)).map((b) => b.toString(16).padStart(2, '0')).join('');
+}
+function base36(v) { return /^[0-9a-z]+$/i.test(v) ? parseInt(v, 36) : NaN; }
+
+function parsePacket(rawValue) {
+  const raw = String(rawValue || '').trim();
+  const parts = raw.split('|');
+  if (raw.startsWith('ISQ1|')) {
+    if (parts.length !== 9) return null;
+    const seq = Number(parts[2]); const total = Number(parts[3]); const byteLength = Number(parts[6]);
+    if (!Number.isInteger(seq) || !Number.isInteger(total) || !Number.isInteger(byteLength)) return null;
+    if (seq < 1 || total < 1 || seq > total || byteLength < 1) return null;
+    const p = { raw, format: 'ISQ1', requestId: parts[1], seq, total, crc32: parts[4].toLowerCase(),
+      sha256: parts[5].toLowerCase(), byteLength, mime: parts[7] || 'application/octet-stream', data: parts[8] };
+    if (!/^[0-9a-f]{8}$/.test(p.crc32) || !/^[0-9a-f]{64}$/.test(p.sha256) || !p.requestId || !p.data) return null;
+    return p;
+  }
+  if (!raw.startsWith('ISQ2|') || parts.length !== 6) return null;
+  const shortId = parts[1]; const seq = base36(parts[2]); const total = base36(parts[3]);
+  const crc = parts[4].toLowerCase(); const data = parts[5];
+  if (!shortId || !Number.isInteger(seq) || !Number.isInteger(total)) return null;
+  if (seq < 0 || total < 1 || seq > total || !data) return null;
+  if (!/^[0-9a-f]{8}$/.test(crc)) return null;
+  if (seq === 0) {
+    let meta;
+    try {
+      const mb = base64ToBytes(data);
+      if (crc32Hex(mb) !== crc) return null;
+      meta = JSON.parse(new TextDecoder().decode(mb));
+    } catch { return null; }
+    const byteLength = Number(meta.b); const sha = String(meta.s || '').toLowerCase();
+    if (!String(meta.r || '') || !Number.isInteger(byteLength) || byteLength < 1) return null;
+    if (!/^[0-9a-f]{64}$/.test(sha)) return null;
+    return { raw, format: 'ISQ2', shortId, isMetadata: true, requestId: String(meta.r), seq, total,
+      crc32: crc, sha256: sha, byteLength, mime: String(meta.m || 'application/octet-stream'), data };
+  }
+  return { raw, format: 'ISQ2', shortId, requestId: shortId, seq, total, crc32: crc,
+    sha256: '', byteLength: 0, mime: 'application/octet-stream', data };
+}
+function compatible(a, b) {
+  if (a.format === 'ISQ2' || b.format === 'ISQ2') return !!a.shortId && !!b.shortId && a.shortId === b.shortId && a.total === b.total;
+  return a.requestId === b.requestId && a.total === b.total && a.sha256 === b.sha256
+    && a.byteLength === b.byteLength && a.mime === b.mime;
+}
+function crcOk(p) { try { return crc32Hex(base64ToBytes(p.data)) === p.crc32; } catch { return false; } }
+function formatRanges(nums) {
+  if (!nums.length) return '';
+  const s = Array.from(new Set(nums)).sort((a, b) => a - b);
+  const parts = [];
+  let start = s[0]; let prev = s[0];
+  for (let i = 1; i <= s.length; i += 1) {
+    const cur = s[i];
+    if (cur === prev + 1) { prev = cur; continue; }
+    parts.push(start === prev ? String(start) : start + '-' + prev);
+    start = cur; prev = cur;
+  }
+  return parts.join(', ');
+}
+
+// ── 상태 ──
+let reference = null;
+const packets = new Map();
+let assembled = null;
+let dup = 0; let bad = 0; let lastSeq = null;
+let stream = null; let running = false; let torchOn = false;
+const recentRaw = new Map(); // raw → ts, 같은 QR 연속 재인식 억제
+
+const $ = (id) => document.getElementById(id);
+const video = $('video');
+
+function setMsg(text) { $('msg').textContent = text; }
+
+function render() {
+  const total = reference ? reference.total : 0;
+  const miss = total ? Math.max(0, total - packets.size) : 0;
+  $('stRecv').textContent = total ? packets.size + '/' + total : '-';
+  $('stMiss').textContent = total ? String(miss) : '-';
+  $('stLast').textContent = lastSeq === null ? '-' : String(lastSeq);
+  $('stDup').textContent = dup + '/' + bad;
+  $('barFill').style.width = total ? Math.round((packets.size / total) * 100) + '%' : '0%';
+  $('bar').classList.toggle('done', !!assembled);
+  const showMissing = !!reference && miss > 0 && packets.size > 0;
+  $('missingBox').classList.toggle('show', showMissing);
+  if (showMissing) {
+    const missing = [];
+    for (let seq = 1; seq <= total; seq += 1) if (!packets.has(seq)) missing.push(seq);
+    $('missingRanges').textContent = formatRanges(missing);
+  }
+}
+
+async function maybeAssemble() {
+  if (!reference || assembled || packets.size !== reference.total) return;
+  try {
+    const bytes = new Uint8Array(reference.byteLength);
+    let offset = 0;
+    for (let seq = 1; seq <= reference.total; seq += 1) {
+      const p = packets.get(seq);
+      const chunk = base64ToBytes(p.data);
+      if (offset + chunk.length > bytes.length) throw new Error('overflow');
+      bytes.set(chunk, offset); offset += chunk.length;
+    }
+    if (offset !== bytes.length) throw new Error('size mismatch');
+    const digest = await sha256Hex(bytes);
+    if (digest && reference.sha256 && digest !== reference.sha256) throw new Error('sha256 불일치');
+    const blob = new Blob([bytes], { type: reference.mime });
+    assembled = { blob, url: URL.createObjectURL(blob), sha: digest, mime: reference.mime };
+    $('resultBox').classList.add('show');
+    $('resultTitle').textContent = digest ? '검증 완료 (sha256 일치)' : '복원 완료';
+    $('resultImg').src = assembled.url;
+    $('resultSha').textContent = digest || '';
+    setMsg('완료 — 이미지 저장을 누르세요');
+    stopCamera();
+  } catch (e) {
+    setMsg('복원 실패: ' + e.message);
+  }
+  render();
+}
+
+function ingest(rawValue) {
+  const now = Date.now();
+  const seen = recentRaw.get(rawValue);
+  if (seen && now - seen < 700) return;
+  recentRaw.set(rawValue, now);
+  if (recentRaw.size > 64) {
+    for (const [k, ts] of recentRaw) { if (now - ts > 3000) recentRaw.delete(k); }
+  }
+
+  const parsed = parsePacket(rawValue);
+  if (!parsed) { bad += 1; render(); return; }
+
+  if (parsed.isMetadata) {
+    if (reference && !compatible(reference, parsed)) { setMsg('다른 스냅샷 QR'); return; }
+    reference = parsed;
+    setMsg('정보 수신 — 데이터 QR 수신 중');
+    render(); maybeAssemble(); return;
+  }
+  let packet = parsed;
+  if (!reference) {
+    if (packet.format === 'ISQ2') { setMsg('정보 QR 대기 (처음 화면부터 비추세요)'); return; }
+    reference = packet;
+  }
+  if (!compatible(reference, packet)) { setMsg('다른 스냅샷 QR'); return; }
+  if (packet.format === 'ISQ2') {
+    packet = Object.assign({}, packet, { requestId: reference.requestId, sha256: reference.sha256,
+      byteLength: reference.byteLength, mime: reference.mime });
+  }
+  if (packets.has(packet.seq)) { dup += 1; lastSeq = packet.seq; render(); return; }
+  if (!crcOk(packet)) { bad += 1; render(); return; }
+  packets.set(packet.seq, packet);
+  lastSeq = packet.seq;
+  setMsg('수신 중');
+  render(); maybeAssemble();
+}
+
+// ── 스캔 엔진 ──
+const hasDetector = 'BarcodeDetector' in window;
+$('engineLabel').textContent = hasDetector ? 'BarcodeDetector' : (window.jsQR ? 'jsQR' : '엔진 없음');
+let detector = null;
+const scanCanvas = document.createElement('canvas');
+const scanCtx = scanCanvas.getContext('2d', { willReadFrequently: true });
+let quadrantPhase = 0;
+
+async function scanLoop() {
+  if (!running) return;
+  try {
+    if (video.readyState >= 2) {
+      if (hasDetector) {
+        if (!detector) detector = new window.BarcodeDetector({ formats: ['qr_code'] });
+        const found = await detector.detect(video);
+        for (const item of found) if (item.rawValue) ingest(item.rawValue);
+      } else if (window.jsQR) {
+        // jsQR 는 호출당 1개만 찾는다 → 전체 프레임과 사분면 크롭을 번갈아 스캔해
+        // 다중 QR 배열(2x2 등)도 커버한다. 비용 절감 위해 최대 900px 로 축소.
+        const vw = video.videoWidth; const vh = video.videoHeight;
+        if (vw && vh) {
+          const scale = Math.min(1, 900 / vw);
+          const regions = quadrantPhase === 0
+            ? [[0, 0, vw, vh]]
+            : [[0, 0, vw / 2, vh / 2], [vw / 2, 0, vw / 2, vh / 2],
+               [0, vh / 2, vw / 2, vh / 2], [vw / 2, vh / 2, vw / 2, vh / 2]];
+          quadrantPhase = (quadrantPhase + 1) % 2;
+          for (const [sx, sy, sw, sh] of regions) {
+            const w = Math.max(1, Math.round(sw * scale)); const h = Math.max(1, Math.round(sh * scale));
+            scanCanvas.width = w; scanCanvas.height = h;
+            scanCtx.drawImage(video, sx, sy, sw, sh, 0, 0, w, h);
+            const img = scanCtx.getImageData(0, 0, w, h);
+            const hit = window.jsQR(img.data, w, h, { inversionAttempts: 'dontInvert' });
+            if (hit && hit.data) ingest(hit.data);
+          }
+        }
+      }
+    }
+  } catch { /* 프레임 단위 오류는 무시 — 다음 프레임 */ }
+  if (running) setTimeout(scanLoop, hasDetector ? 60 : 120);
+}
+
+async function startCamera() {
+  if (running) { stopCamera(); return; }
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia || (!hasDetector && !window.jsQR)) {
+    $('unsupported').style.display = 'block';
+    return;
+  }
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { facingMode: 'environment', width: { ideal: 1920 }, height: { ideal: 1080 } },
+      audio: false,
+    });
+  } catch (e) {
+    $('unsupported').style.display = 'block';
+    setMsg('카메라 열기 실패: ' + e.message);
+    return;
+  }
+  video.srcObject = stream;
+  await video.play();
+  running = true;
+  $('stage').classList.remove('idle');
+  $('btnStart').textContent = '정지';
+  const track = stream.getVideoTracks()[0];
+  const caps = track.getCapabilities ? track.getCapabilities() : {};
+  $('btnTorch').disabled = !caps.torch;
+  setMsg('스캔 중 — 정보 QR부터');
+  scanLoop();
+}
+
+function stopCamera() {
+  running = false;
+  if (stream) { stream.getTracks().forEach((t) => t.stop()); stream = null; }
+  video.srcObject = null;
+  $('stage').classList.add('idle');
+  $('btnStart').textContent = '시작';
+  $('btnTorch').disabled = true;
+  torchOn = false;
+}
+
+$('btnStart').addEventListener('click', startCamera);
+$('btnTorch').addEventListener('click', async () => {
+  const track = stream && stream.getVideoTracks()[0];
+  if (!track) return;
+  torchOn = !torchOn;
+  try { await track.applyConstraints({ advanced: [{ torch: torchOn }] }); } catch { /* 미지원 */ }
+});
+$('btnReset').addEventListener('click', () => {
+  reference = null; packets.clear(); assembled = null; dup = 0; bad = 0; lastSeq = null;
+  recentRaw.clear();
+  $('resultBox').classList.remove('show');
+  $('missingBox').classList.remove('show');
+  setMsg('대기 — 송신 화면의 정보 QR부터 비추세요');
+  render();
+});
+$('btnSave').addEventListener('click', () => {
+  if (!assembled) return;
+  const ext = assembled.mime.includes('webp') ? 'webp' : assembled.mime.includes('png') ? 'png' : 'jpg';
+  const a = document.createElement('a');
+  a.href = assembled.url;
+  a.download = 'insid-snapshot-' + Date.now() + '.' + ext;
+  a.click();
+});
+
+render();
+
+// ── PWA(오프라인) ──
+if ('serviceWorker' in navigator && location.protocol === 'https:') {
+  navigator.serviceWorker.register('sw.js').catch(() => { /* 오프라인 설치 실패는 치명 아님 */ });
+}
+</script>
+</body>
+</html>
